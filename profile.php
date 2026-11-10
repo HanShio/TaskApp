@@ -1,91 +1,52 @@
 <?php
+// profile.php: user information, task statistics, work history and account deletion
 require 'includes/auth.php';
 require 'config/db.php';
 require 'includes/functions.php';
 
-$userId        = $_SESSION['user_id'];
-$profileErrors = [];
-$deleteErrors  = [];
+$userId       = $_SESSION['user_id'];
+$deleteErrors = [];
 
+// ---- Load the user's details ----
 $stmt = $conn->prepare("SELECT fullname, email, phone, bio, created_at FROM users WHERE id = ?");
 $stmt->bind_param("i", $userId);
 $stmt->execute();
 $user = $stmt->get_result()->fetch_assoc();
 
-$form = [
-    'fullname' => $user['fullname'],
-    'phone'    => $user['phone'] ?? '',
-    'bio'      => $user['bio'] ?? ''
-];
+// ---- Delete account ----
+if ($_SERVER["REQUEST_METHOD"] === "POST" && ($_POST['action'] ?? '') === 'delete_account') {
+    $password = $_POST['password'] ?? '';
 
-if ($_SERVER["REQUEST_METHOD"] === "POST") {
-    $action = $_POST['action'] ?? '';
-
-    if ($action === 'update_profile') {
-        $form['fullname'] = trim($_POST['fullname'] ?? '');
-        $form['phone']    = trim($_POST['phone'] ?? '');
-        $form['bio']      = trim($_POST['bio'] ?? '');
-
-        if ($form['fullname'] === "") {
-            $profileErrors[] = "Full name is required.";
-        } elseif (strlen($form['fullname']) < 3) {
-            $profileErrors[] = "Full name must be at least 3 characters.";
-        } elseif (strlen($form['fullname']) > 100) {
-            $profileErrors[] = "Full name must not exceed 100 characters.";
-        }
-        if ($form['phone'] !== "" && !preg_match('/^[0-9+\-\s]{7,20}$/', $form['phone'])) {
-            $profileErrors[] = "Phone number must be 7 to 20 characters (digits, +, - and spaces only).";
-        }
-        if (strlen($form['bio']) > 255) {
-            $profileErrors[] = "Bio must not exceed 255 characters.";
-        }
-
-        if (empty($profileErrors)) {
-            $phone = ($form['phone'] === '') ? null : $form['phone'];
-            $bio   = ($form['bio'] === '')   ? null : $form['bio'];
-
-            $stmt = $conn->prepare("UPDATE users SET fullname = ?, phone = ?, bio = ? WHERE id = ?");
-            $stmt->bind_param("sssi", $form['fullname'], $phone, $bio, $userId);
-            $stmt->execute();
-
-            $_SESSION['fullname'] = $form['fullname'];   
-            header("Location: profile.php?msg=updated");
-            exit;
-        }
+    if ($password === '') {
+        $deleteErrors[] = "Enter your password to confirm.";
+    }
+    if (!isset($_POST['confirm_delete'])) {
+        $deleteErrors[] = "Tick the box to confirm you understand.";
     }
 
-    if ($action === 'delete_account') {
-        $password = $_POST['password'] ?? '';
+    if (empty($deleteErrors)) {
+        $stmt = $conn->prepare("SELECT password FROM users WHERE id = ?");
+        $stmt->bind_param("i", $userId);
+        $stmt->execute();
+        $row = $stmt->get_result()->fetch_assoc();
 
-        if ($password === '') {
-            $deleteErrors[] = "Enter your password to confirm.";
-        }
-        if (!isset($_POST['confirm_delete'])) {
-            $deleteErrors[] = "Tick the box to confirm you understand.";
-        }
-
-        if (empty($deleteErrors)) {
-            $stmt = $conn->prepare("SELECT password FROM users WHERE id = ?");
+        if (!$row || !password_verify($password, $row['password'])) {
+            $deleteErrors[] = "Incorrect password. Your account was not deleted.";
+        } else {
+            // ON DELETE CASCADE removes this user's tasks, categories, notes and log
+            $stmt = $conn->prepare("DELETE FROM users WHERE id = ?");
             $stmt->bind_param("i", $userId);
             $stmt->execute();
-            $row = $stmt->get_result()->fetch_assoc();
 
-            if (!$row || !password_verify($password, $row['password'])) {
-                $deleteErrors[] = "Incorrect password. Your account was not deleted.";
-            } else {
-                $stmt = $conn->prepare("DELETE FROM users WHERE id = ?");
-                $stmt->bind_param("i", $userId);
-                $stmt->execute();
-
-                $_SESSION = [];
-                session_destroy();
-                header("Location: login.php?deleted=1");
-                exit;
-            }
+            $_SESSION = [];
+            session_destroy();
+            header("Location: login.php?deleted=1");
+            exit;
         }
     }
 }
 
+// ---- Load all of the user's tasks, then split them into current and completed ----
 $stmt = $conn->prepare(
     "SELECT t.id, t.title, t.due_date, t.status, t.completed_at,
             p.name AS priority, c.name AS category, c.color
@@ -111,6 +72,7 @@ while ($t = $result->fetch_assoc()) {
     }
 }
 
+// ---- Load the activity history (latest 50 actions) ----
 $stmt = $conn->prepare(
     "SELECT task_title, action, created_at FROM activity_log
      WHERE user_id = ? ORDER BY created_at DESC, id DESC LIMIT 50"
@@ -119,6 +81,7 @@ $stmt->bind_param("i", $userId);
 $stmt->execute();
 $activity = $stmt->get_result()->fetch_all(MYSQLI_ASSOC);
 
+// ---- Display helpers ----
 $badge         = ['Pending' => 'badge-pending', 'In Progress' => 'badge-progress', 'Done' => 'badge-done'];
 $priorityBadge = ['High' => 'bg-danger', 'Medium' => 'bg-warning text-dark', 'Low' => 'bg-secondary'];
 $actionBadge   = [
@@ -139,55 +102,38 @@ include 'includes/header.php';
   <div class="alert alert-success">Profile updated successfully.</div>
 <?php endif; ?>
 
-<div class="row g-4 mb-4">
-  <div class="col-md-5">
-    <div class="table-card h-100">
-      <h5>User Information</h5>
-      <ul class="list-unstyled mb-0">
-        <li class="mb-2"><strong>Name:</strong> <?= htmlspecialchars($user['fullname']) ?></li>
-        <li class="mb-2"><strong>Email:</strong> <?= htmlspecialchars($user['email']) ?></li>
-        <li class="mb-2"><strong>Phone:</strong> <?= $user['phone'] ? htmlspecialchars($user['phone']) : '<span class="text-muted">Not set</span>' ?></li>
-        <li class="mb-2"><strong>Bio:</strong> <?= $user['bio'] ? htmlspecialchars($user['bio']) : '<span class="text-muted">Not set</span>' ?></li>
-        <li><strong>Member since:</strong> <?= date('d M Y', strtotime($user['created_at'])) ?></li>
-      </ul>
-    </div>
+<!-- ===== 1. User information (full-width card) ===== -->
+<div class="table-card mb-4">
+  <div class="d-flex justify-content-between align-items-center mb-3">
+    <h5 class="mb-0">User Information</h5>
+    <a href="edit_profile.php" class="btn btn-primary btn-sm">Edit Profile</a>
   </div>
 
-  <div class="col-md-7">
-    <div class="table-card h-100">
-      <h5>Edit Profile</h5>
-
-      <div id="profileClientErrors" class="alert alert-danger d-none"></div>
-      <?php if (!empty($profileErrors)): ?>
-        <div class="alert alert-danger">
-          <ul class="mb-0">
-            <?php foreach ($profileErrors as $e): ?><li><?= htmlspecialchars($e) ?></li><?php endforeach; ?>
-          </ul>
-        </div>
-      <?php endif; ?>
-
-      <form name="profileForm" method="post" action="profile.php" onsubmit="return validateProfile()" novalidate>
-        <input type="hidden" name="action" value="update_profile">
-        <div class="mb-3">
-          <label for="fullname" class="form-label">Full Name</label>
-          <input type="text" class="form-control" id="fullname" name="fullname" maxlength="100"
-                 value="<?= htmlspecialchars($form['fullname']) ?>">
-        </div>
-        <div class="mb-3">
-          <label for="phone" class="form-label">Phone (optional)</label>
-          <input type="text" class="form-control" id="phone" name="phone" maxlength="20"
-                 value="<?= htmlspecialchars($form['phone']) ?>">
-        </div>
-        <div class="mb-3">
-          <label for="bio" class="form-label">Bio (optional)</label>
-          <textarea class="form-control" id="bio" name="bio" rows="2" maxlength="255"><?= htmlspecialchars($form['bio']) ?></textarea>
-        </div>
-        <button type="submit" class="btn btn-primary">Save Changes</button>
-      </form>
+  <div class="row g-3">
+    <div class="col-md-6">
+      <div class="text-muted small">Name</div>
+      <div><?= htmlspecialchars($user['fullname']) ?></div>
+    </div>
+    <div class="col-md-6">
+      <div class="text-muted small">Email</div>
+      <div><?= htmlspecialchars($user['email']) ?></div>
+    </div>
+    <div class="col-md-6">
+      <div class="text-muted small">Phone</div>
+      <div><?= $user['phone'] ? htmlspecialchars($user['phone']) : '<span class="text-muted">Not set</span>' ?></div>
+    </div>
+    <div class="col-md-6">
+      <div class="text-muted small">Member since</div>
+      <div><?= date('d M Y', strtotime($user['created_at'])) ?></div>
+    </div>
+    <div class="col-12">
+      <div class="text-muted small">Bio</div>
+      <div><?= $user['bio'] ? htmlspecialchars($user['bio']) : '<span class="text-muted">Not set</span>' ?></div>
     </div>
   </div>
 </div>
 
+<!-- ===== 2. Three stat cards ===== -->
 <div class="row g-3 mb-4">
   <div class="col-md-4">
     <div class="stat-card stat-completed">
@@ -209,29 +155,32 @@ include 'includes/header.php';
   </div>
 </div>
 
+<!-- ===== 3. All work: current, completed and history ===== -->
 <div class="table-card mb-4">
-  <h5>My Work</h5>
+  <div class="d-flex flex-wrap justify-content-between align-items-center gap-2 mb-3">
+    <h5 class="mb-0">My Work</h5>
+    <input type="search" id="workSearch" class="form-control" style="max-width: 320px;"
+           placeholder="Search all my tasks..." aria-label="Search my work" oninput="filterWork()">
+  </div>
 
   <ul class="nav nav-tabs mb-3" role="tablist">
     <li class="nav-item">
-      <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-current" type="button">
-        Current (<?= count($current) ?>)
-      </button>
+      <button class="nav-link active" data-bs-toggle="tab" data-bs-target="#tab-current"
+              data-label="Current" type="button">Current (<?= count($current) ?>)</button>
     </li>
     <li class="nav-item">
-      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-done" type="button">
-        Completed (<?= count($completed) ?>)
-      </button>
+      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-done"
+              data-label="Completed" type="button">Completed (<?= count($completed) ?>)</button>
     </li>
     <li class="nav-item">
-      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-activity" type="button">
-        Activity History (<?= count($activity) ?>)
-      </button>
+      <button class="nav-link" data-bs-toggle="tab" data-bs-target="#tab-activity"
+              data-label="Activity History" type="button">Activity History (<?= count($activity) ?>)</button>
     </li>
   </ul>
 
-  <div class="tab-content">
+  <div class="tab-content" id="workTabContent">
 
+    <!-- Current tasks -->
     <div class="tab-pane fade show active" id="tab-current">
       <?php if (empty($current)): ?>
         <p class="text-muted mb-0">No current tasks.</p>
@@ -252,9 +201,11 @@ include 'includes/header.php';
             </tbody>
           </table>
         </div>
+        <p class="no-match text-muted text-center my-3 d-none">No tasks match your search.</p>
       <?php endif; ?>
     </div>
 
+    <!-- Completed tasks (past work) -->
     <div class="tab-pane fade" id="tab-done">
       <?php if (empty($completed)): ?>
         <p class="text-muted mb-0">No completed tasks yet.</p>
@@ -274,9 +225,11 @@ include 'includes/header.php';
             </tbody>
           </table>
         </div>
+        <p class="no-match text-muted text-center my-3 d-none">No tasks match your search.</p>
       <?php endif; ?>
     </div>
 
+    <!-- Activity history -->
     <div class="tab-pane fade" id="tab-activity">
       <?php if (empty($activity)): ?>
         <p class="text-muted mb-0">No activity recorded yet.</p>
@@ -296,12 +249,14 @@ include 'includes/header.php';
             </tbody>
           </table>
         </div>
+        <p class="no-match text-muted text-center my-3 d-none">No activity matches your search.</p>
       <?php endif; ?>
     </div>
 
   </div>
 </div>
 
+<!-- ===== 4. Delete account (bottom of the page) ===== -->
 <div class="card border-danger mb-4">
   <div class="card-header bg-danger text-white">Delete Account</div>
   <div class="card-body">
@@ -337,5 +292,6 @@ include 'includes/header.php';
 </div>
 
 <script src="js/validate.js"></script>
+<script src="js/search.js"></script>
 
 <?php include 'includes/footer.php'; ?>

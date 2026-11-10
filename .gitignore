@@ -13,6 +13,7 @@ composer.phar
 
 # Database dumps and local backups
 *.sql
+!database.sql
 *.sqlite
 *.bak
 
@@ -35,3 +36,4 @@ $RECYCLE.BIN/
 *.tmp
 *.temp
 *.cache
+
